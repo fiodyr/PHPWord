@@ -11,19 +11,19 @@
  * contributors, visit https://github.com/PHPOffice/PHPWord/contributors.
  *
  * @see         https://github.com/PHPOffice/PHPWord
- * @copyright   2010-2018 PHPWord contributors
+ * @copyright   2010-2017 PHPWord contributors
  * @license     http://www.gnu.org/licenses/lgpl.txt LGPL version 3
  */
 
 namespace PhpOffice\PhpWord;
 
-use PhpOffice\Common\Text;
 use PhpOffice\PhpWord\Escaper\RegExp;
 use PhpOffice\PhpWord\Escaper\Xml;
 use PhpOffice\PhpWord\Exception\CopyFileException;
 use PhpOffice\PhpWord\Exception\CreateTemporaryFileException;
 use PhpOffice\PhpWord\Exception\Exception;
 use PhpOffice\PhpWord\Shared\ZipArchive;
+use Zend\Stdlib\StringUtils;
 
 class TemplateProcessor
 {
@@ -192,7 +192,7 @@ class TemplateProcessor
      */
     protected static function ensureUtf8Encoded($subject)
     {
-        if (!Text::isUTF8($subject)) {
+        if (!StringUtils::isValidUtf8($subject)) {
             $subject = utf8_encode($subject);
         }
 
@@ -251,7 +251,67 @@ class TemplateProcessor
 
         return array_unique($variables);
     }
+    /**
+     * Clone a table row in a template document.
+     *
+     * @param string $search
+     * @param string $search2
+     * @param int $id
+     *
+     * @throws \PhpOffice\PhpWord\Exception\Exception
+     */
+    public function smartCloneRow($search,$search2, $id)
+    {
+        if ('${' !== substr($search, 0, 2) && '}' !== substr($search, -1)) {
+            $search = '${' . $search . '}';
+        }
+        if ('${' !== substr($search2, 0, 2) && '}' !== substr($search2, -1)) {
+            $search2 = '${' . $search2 . '}';
+        }
+		
+        $tagPos = strpos($this->tempDocumentMainPart, $search);
+        $tagPos2 = strpos($this->tempDocumentMainPart, $search2);
+		
+        if (!$tagPos||!$tagPos2) {
+            throw new Exception('Can not clone row, template variable not found or variable contains markup.');
+        }
 
+        $rowStart = $this->findRowStart($tagPos);
+		$rowLast  = $this->findRowStart($tagPos2);
+        $rowEnd   = $this->findRowEnd($tagPos);
+
+        $xmlRow   = $this->getSlice($rowStart, $rowEnd);
+        // Check if there's a cell spanning multiple rows.
+        if (preg_match('#<w:vMerge w:val="restart"/>#', $xmlRow)) {
+            // $extraRowStart = $rowEnd;
+            $extraRowEnd = $rowEnd;
+            while (true) {
+                $extraRowStart = $this->findRowStart($extraRowEnd + 1);
+                $extraRowEnd   = $this->findRowEnd($extraRowEnd + 1);
+
+                // If extraRowEnd is lower then 7, there was no next row found.
+                if ($extraRowEnd < 7) {
+                    break;
+                }
+
+                // If tmpXmlRow doesn't contain continue, this row is no longer part of the spanned row.
+                $tmpXmlRow = $this->getSlice($extraRowStart, $extraRowEnd);
+                if (!preg_match('#<w:vMerge/>#', $tmpXmlRow) &&
+                    !preg_match('#<w:vMerge w:val="continue" />#', $tmpXmlRow)) {
+                    break;
+                }
+                // This row was a spanned row, update $rowEnd and search for the next row.
+                $rowEnd = $extraRowEnd;
+            }
+            $xmlRow = $this->getSlice($rowStart, $rowEnd);
+        }
+		
+        $result = $this->getSlice(0, $rowLast);
+        $result .= preg_replace('/\$\{(.*?)\}/', '\${\\1#' . $id . '}', $xmlRow);
+        $result .= $this->getSlice($rowLast);
+
+        $this->tempDocumentMainPart = $result;
+    }
     /**
      * Clone a table row in a template document.
      *
@@ -301,9 +361,11 @@ class TemplateProcessor
         }
 
         $result = $this->getSlice(0, $rowStart);
-        for ($i = 1; $i <= $numberOfClones; $i++) {
-            $result .= preg_replace('/\$\{(.*?)\}/', '\${\\1#' . $i . '}', $xmlRow);
-        }
+		if ( $numberOfClones > 0 ) {
+			for ($i = 1; $i <= $numberOfClones; $i++) {
+				$result .= preg_replace('/\$\{(.*?)\}/', '\${\\1#' . $i . '}', $xmlRow);
+			}
+		}
         $result .= $this->getSlice($rowEnd);
 
         $this->tempDocumentMainPart = $result;
@@ -422,7 +484,7 @@ class TemplateProcessor
         }
 
         /*
-         * Note: we do not use `rename` function here, because it loses file ownership data on Windows platform.
+         * Note: we do not use `rename` function here, because it looses file ownership data on Windows platform.
          * As a result, user cannot open the file directly getting "Access denied" message.
          *
          * @see https://github.com/PHPOffice/PHPWord/issues/532
